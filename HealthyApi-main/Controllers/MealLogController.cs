@@ -137,21 +137,40 @@ namespace HealthyApi.Controllers
         }
 
         // ===================== 15. 删除食物记录 =====================
+        // ===================== 15. 删除食物记录 =====================
         [HttpPost("delete")]
         public async Task<IActionResult> DeleteMealRecord([FromBody] DeleteMealRequest req)
         {
+            // 1) 先把要删的食物及其所属的 MealLog 查出来
             var mealFood = await _context.MealFoods
-                .Include(f => f.MealLog)
-                .FirstOrDefaultAsync(f => f.MealFoodId == req.food_id && f.MealLog.UserId == req.user_id);
+                .Include(f => f.MealLog)               // 只依赖导航属性，不依赖 FK 字段名
+                .FirstOrDefaultAsync(f =>
+                    f.MealFoodId == req.food_id &&
+                    f.MealLog.UserId == req.user_id);  // 继续用导航属性里的 UserId 过滤
 
             if (mealFood == null)
                 return NotFound("记录不存在");
 
+            var mealLog = mealFood.MealLog;            // 记录一下这顿饭的日志实体
+
+            // 2) 先删这条食物
             _context.MealFoods.Remove(mealFood);
             await _context.SaveChangesAsync();
 
+            // 3) 再检查这顿饭是否还有剩余食物
+            //    关键点：用“实体比较”避免写 MealLogId/Id 等具体字段名
+            var hasRemainingFoods = await _context.MealFoods
+                .AnyAsync(f => f.MealLog == mealLog);
+
+            if (!hasRemainingFoods)
+            {
+                _context.MealLogs.Remove(mealLog);
+                await _context.SaveChangesAsync();
+            }
+
             return Ok();
         }
+
 
         // ======= DTO（数据结构）=======
 
