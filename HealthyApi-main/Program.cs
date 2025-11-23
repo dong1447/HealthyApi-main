@@ -33,6 +33,13 @@ builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
+// ===================== ★ 自动创建数据库与所有表 ★ =====================
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<DataContext>();
+    db.Database.EnsureCreated();   // ← 关键代码：自动创建 healthy.db 和所有表
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -41,16 +48,11 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-// ✅ 必须放在 MapControllers() 之前
+// 必须在 MapControllers 之前
 app.UseCors("AllowAll");
 
-// ✅ 你之前 **缺少这句**
 app.UseAuthorization();
 
 app.MapControllers();
-// ✅ 监听外部访问
-var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
-app.Urls.Add($"http://0.0.0.0:{port}");
 
 app.Run();
-

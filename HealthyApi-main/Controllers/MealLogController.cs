@@ -27,11 +27,11 @@ namespace HealthyApi.Controllers
             if (user == null)
                 return NotFound("找不到对应的用户");
 
-            // 2️⃣ 创建新的餐次记录（MealLog）
+            // 2️⃣ 创建 MealLog
             var mealLog = new MealLog
             {
                 UserId = request.user_id,
-                Date = request.date,
+                Date = request.date.Date,
                 MealType = request.meal_type switch
                 {
                     "早餐" => "breakfast",
@@ -43,26 +43,30 @@ namespace HealthyApi.Controllers
             };
 
             _context.MealLogs.Add(mealLog);
-            await _context.SaveChangesAsync(); // 保存后生成 meal_id
+            await _context.SaveChangesAsync();
 
-            // 3️⃣ 遍历 meals 数组，为每个食物创建 MealFood 记录
-            foreach (var food in request.meals)
+            // 3️⃣ 保存 MealFood
+            foreach (var item in request.meals)
             {
+                var food = await _context.Foods.FindAsync(item.food_id);
+                if (food == null)
+                    return BadRequest($"无效的 food_id: {item.food_id}");
+
                 var mealFood = new MealFood
                 {
                     MealId = mealLog.MealId,
-                    FoodName = food.name,
-                    Amount = food.grams,
-                    Calorie = food.calorie
+                    FoodId = item.food_id,
+                    Amount = item.grams
                 };
+
                 _context.MealFoods.Add(mealFood);
             }
 
             await _context.SaveChangesAsync();
 
-            // ✅ 前端无需返回内容，只返回 HTTP200
             return Ok();
         }
+
 
         // ===================== 14. 获取食物记录 =====================
         [HttpGet("records")]
@@ -78,43 +82,54 @@ namespace HealthyApi.Controllers
                 .Where(m => m.UserId == user_id)
                 .AsQueryable();
 
-            // 1) today 模式
+            // ===================== ① today 模式 =====================
             if (mode == "today" && date.HasValue)
             {
-                var todayMeals = await query
+                var todayMealLogs = await query
                     .Where(m => m.Date == date.Value.Date)
                     .OrderBy(m => m.MealType)
-                    .Select(m => new TodayMealDto
+                    .ToListAsync();
+
+                var result = todayMealLogs.Select(m => new TodayMealDto
+                {
+                    MealType = m.MealType,
+                    Items = m.MealFoods.Select(f =>
                     {
-                        MealType = m.MealType,
-                        Items = m.MealFoods.Select(f => new FoodItemDto
+                        var food = _context.Foods.FirstOrDefault(x => x.FoodId == f.FoodId);
+                        return new FoodItemDto
                         {
                             Id = f.MealFoodId,
-                            Name = f.FoodName,
+                            Name = food?.Name ?? "",
                             Amount = f.Amount,
-                            Calorie = f.Calorie
-                        }).ToList()
-                    })
-                    .ToListAsync();
+                            Calorie = food == null ? 0 : Math.Round(food.Calories * f.Amount / 100.0, 2)
+                        };
+                    }).ToList()
+                }).ToList();
 
                 var records = new
                 {
-                    breakfast = todayMeals.FirstOrDefault(x => x.MealType == "breakfast")?.Items ?? new List<FoodItemDto>(),
-                    lunch = todayMeals.FirstOrDefault(x => x.MealType == "lunch")?.Items ?? new List<FoodItemDto>(),
-                    dinner = todayMeals.FirstOrDefault(x => x.MealType == "dinner")?.Items ?? new List<FoodItemDto>(),
-                    snack = todayMeals.FirstOrDefault(x => x.MealType == "snack")?.Items ?? new List<FoodItemDto>()
+                    breakfast = result.FirstOrDefault(x => x.MealType == "breakfast")?.Items ?? new List<FoodItemDto>(),
+                    lunch = result.FirstOrDefault(x => x.MealType == "lunch")?.Items ?? new List<FoodItemDto>(),
+                    dinner = result.FirstOrDefault(x => x.MealType == "dinner")?.Items ?? new List<FoodItemDto>(),
+                    snack = result.FirstOrDefault(x => x.MealType == "snack")?.Items ?? new List<FoodItemDto>()
                 };
 
                 return Ok(new { records });
             }
 
-            // 2) week / month 模式
-            if ((mode == "week" || mode == "month") && start.HasValue && end.HasValue)
-                query = query.Where(m => m.Date >= start.Value && m.Date <= end.Value);
 
-            // 3) all 模式
-            var grouped = await query
+            // ===================== ② week / month 模式处理 =====================
+            if ((mode == "week" || mode == "month") && start.HasValue && end.HasValue)
+            {
+                query = query.Where(m => m.Date >= start.Value && m.Date <= end.Value);
+            }
+
+            // ===================== ③ all / week / month 共有查询 =====================
+            var allLogs = await query
                 .OrderByDescending(m => m.Date)
+                .ToListAsync();
+
+            var grouped = allLogs
                 .GroupBy(m => m.Date)
                 .Select(g => new
                 {
@@ -122,45 +137,45 @@ namespace HealthyApi.Controllers
                     meals = g.Select(m => new
                     {
                         type = m.MealType,
-                        items = m.MealFoods.Select(f => new
+                        items = m.MealFoods.Select(f =>
                         {
-                            id = f.MealFoodId,
-                            name = f.FoodName,
-                            amount = f.Amount,
-                            calorie = f.Calorie
+                            var food = _context.Foods.FirstOrDefault(x => x.FoodId == f.FoodId);
+                            return new
+                            {
+                                id = f.MealFoodId,
+                                name = food?.Name ?? "",
+                                amount = f.Amount,
+                                calorie = food == null ? 0 : Math.Round(food.Calories * f.Amount / 100.0, 2)
+                            };
                         }).ToList()
                     }).ToList()
                 })
-                .ToListAsync();
+                .ToList();
 
             return Ok(grouped);
         }
 
-        // ===================== 15. 删除食物记录 =====================
+
         // ===================== 15. 删除食物记录 =====================
         [HttpPost("delete")]
         public async Task<IActionResult> DeleteMealRecord([FromBody] DeleteMealRequest req)
         {
-            // 1) 先把要删的食物及其所属的 MealLog 查出来
             var mealFood = await _context.MealFoods
-                .Include(f => f.MealLog)               // 只依赖导航属性，不依赖 FK 字段名
+                .Include(f => f.MealLog)
                 .FirstOrDefaultAsync(f =>
                     f.MealFoodId == req.food_id &&
-                    f.MealLog.UserId == req.user_id);  // 继续用导航属性里的 UserId 过滤
+                    f.MealLog.UserId == req.user_id);
 
             if (mealFood == null)
                 return NotFound("记录不存在");
 
-            var mealLog = mealFood.MealLog;            // 记录一下这顿饭的日志实体
+            var mealLog = mealFood.MealLog;
 
-            // 2) 先删这条食物
             _context.MealFoods.Remove(mealFood);
             await _context.SaveChangesAsync();
 
-            // 3) 再检查这顿饭是否还有剩余食物
-            //    关键点：用“实体比较”避免写 MealLogId/Id 等具体字段名
-            var hasRemainingFoods = await _context.MealFoods
-                .AnyAsync(f => f.MealLog == mealLog);
+            bool hasRemainingFoods = await _context.MealFoods
+                .AnyAsync(f => f.MealId == mealLog.MealId);
 
             if (!hasRemainingFoods)
             {
@@ -173,7 +188,6 @@ namespace HealthyApi.Controllers
 
 
         // ======= DTO（数据结构）=======
-
         public class MealRecordRequest
         {
             public int user_id { get; set; }
@@ -184,9 +198,8 @@ namespace HealthyApi.Controllers
 
         public class MealItemDto
         {
-            public string name { get; set; } = "";
+            public int food_id { get; set; }
             public double grams { get; set; }
-            public double calorie { get; set; }
         }
 
         public class DeleteMealRequest
@@ -195,7 +208,7 @@ namespace HealthyApi.Controllers
             public int food_id { get; set; }
         }
 
-        private class FoodItemDto
+        public class FoodItemDto
         {
             public int Id { get; set; }
             public string Name { get; set; } = "";
@@ -203,7 +216,7 @@ namespace HealthyApi.Controllers
             public double Calorie { get; set; }
         }
 
-        private class TodayMealDto
+        public class TodayMealDto
         {
             public string MealType { get; set; } = "";
             public List<FoodItemDto> Items { get; set; } = new();

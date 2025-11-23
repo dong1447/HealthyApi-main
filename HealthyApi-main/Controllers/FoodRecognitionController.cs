@@ -178,6 +178,7 @@ namespace HealthyApi.Controllers
         [HttpPost("save")]
         public async Task<IActionResult> SaveMeal([FromBody] SaveMealRequest req)
         {
+            // 创建用户当天的 MealLog
             var mealLog = new MealLog
             {
                 UserId = req.UserId,
@@ -185,23 +186,33 @@ namespace HealthyApi.Controllers
                 MealType = req.MealType,
                 Note = "AI"
             };
+
             _context.MealLogs.Add(mealLog);
             await _context.SaveChangesAsync();
 
+            // 逐条保存食物（必须使用 FoodId）
             foreach (var item in req.Foods)
             {
+                // 检查 Food 表是否存在
+                var food = await _context.Foods.FindAsync(item.FoodId);
+                if (food == null)
+                {
+                    return BadRequest($"无效的 food_id: {item.FoodId}");
+                }
+
                 _context.MealFoods.Add(new MealFood
                 {
                     MealId = mealLog.MealId,
-                    FoodName = item.FoodName,
-                    Calorie = item.Calorie,
+                    FoodId = item.FoodId,
                     Amount = item.Amount
                 });
             }
 
             await _context.SaveChangesAsync();
+
             return Ok(new { message = "保存成功", meal_id = mealLog.MealId });
         }
+
 
         public class SaveMealRequest
         {
@@ -212,10 +223,10 @@ namespace HealthyApi.Controllers
 
         public class FoodDto
         {
-            public string FoodName { get; set; } = "";
-            public double Calorie { get; set; }
-            public int Amount { get; set; } = 100;
+            public int FoodId { get; set; }   // 必须传 FoodId
+            public double Amount { get; set; }
         }
+
 
         // ===================== (6) 内部DTO =====================
         private class FoodItem
